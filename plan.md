@@ -58,7 +58,7 @@
        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
      )
    ```
-3. Crear `lib/supabase/server.ts` con `createServerClient` y los cookie handlers para Server Components y Middleware (siguiendo la guía oficial de `@supabase/ssr`).
+3. Crear `lib/supabase/server.ts` con `createServerClient` y los cookie handlers **exclusivamente para el Middleware** (`middleware.ts`). No usar este helper en Server Components para data fetching — toda lectura de datos ocurre en Client Components vía React Query (ADR-0003). Los cookie handlers leen de `request.cookies` y escriben en `response.cookies`.
 4. Crear `.env.local` con `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_ANON_KEY` (valores reales del proyecto Supabase).
 5. Crear `app/providers.tsx` (Client Component) con `QueryClientProvider` wrapeando `{children}` y `ReactQueryDevtools` en desarrollo.
 6. Envolver el `<body>` de `app/layout.tsx` con `<Providers>`.
@@ -249,7 +249,18 @@ Después del SQL: en Supabase Studio → Database → Replication, habilitar Rea
 3. Lógica semanal: agrupar check-ins en ventanas de 7 días (empezando desde el lunes de la semana actual hacia atrás), verificar si cada ventana tiene al menos 1 check-in, contar semanas consecutivas hacia atrás hasta el primer gap.
 4. Retornar `{ current: 0, unit: 'días' }` para array vacío.
 
-**Criterio de hecho**: Ejecutando `node -e "const {calculateStreak} = require('./lib/streak'); console.log(calculateStreak([], 'daily', 7))"` (o equivalente con ts-node) devuelve `{ current: 0, unit: 'días' }`. Para 7 timestamps de días consecutivos devuelve `{ current: 7, unit: 'días' }`.
+**Criterio de hecho**: Añadir al final de `lib/streak.ts` un bloque temporal:
+```ts
+// bloque temporal — eliminar antes del commit
+if (require.main === module) {
+  console.log(calculateStreak([], 'daily', 7))
+  const sevenDays = Array.from({ length: 7 }, (_, i) => ({
+    timestamp: new Date(Date.now() - i * 86400000).toISOString()
+  }))
+  console.log(calculateStreak(sevenDays, 'daily', 7))
+}
+```
+Ejecutar `npx tsx lib/streak.ts`. El primer log devuelve `{ current: 0, unit: 'días' }` y el segundo `{ current: 7, unit: 'días' }`. Eliminar el bloque antes del commit. Mínimo garantizado sin tsx: `npm run build` completa sin errores de TypeScript.
 
 **ADR referenciados**: ADR-0001
 
@@ -277,7 +288,7 @@ Después del SQL: en Supabase Studio → Database → Replication, habilitar Rea
 **Criterio de hecho**: Con un usuario autenticado y al menos un hábito en Supabase, el dashboard muestra ese hábito dentro de su grupo de categoría con la racha correcta. Si no hay hábitos, muestra `EmptyState`. TC-12 y TC-22 pasan manualmente.
 
 **ADR referenciados**: ADR-0001, ADR-0003  
-**Pruebas manuales**: TC-12, TC-22
+**Pruebas manuales**: TC-12, TC-20, TC-21, TC-22, TC-23, TC-24
 
 ---
 
@@ -300,6 +311,7 @@ Después del SQL: en Supabase Studio → Database → Replication, habilitar Rea
    - `Select` categoría (cargado desde `useCategories`, requerido, no puede quedar vacío).
    - Botón "Guardar" (primario) + botón "Cancelar" (secundario).
 4. En `app/(protected)/page.tsx`: botón "Nuevo hábito" abre `Dialog` con `HabitForm`. Al guardar: cerrar dialog + toast opcional de éxito.
+5. En `HabitForm`, añadir opción "Crear categoría..." al final del `Select` de categoría. Al seleccionarla: mostrar un `Input` inline con botón "Añadir". Al confirmar: `supabase.from('categories').insert({ name, user_id })` → `queryClient.invalidateQueries(['categories'])` → la nueva categoría queda seleccionada automáticamente (TC-26).
 
 **Criterio de hecho**: TC-07, TC-08, TC-25, TC-26, TC-27 pasan manualmente. Un hábito creado aparece en el dashboard sin recargar la página.
 
@@ -326,7 +338,7 @@ Después del SQL: en Supabase Studio → Database → Replication, habilitar Rea
 4. Montar `CheckInToggle` dentro de `HabitCard` (reemplazar el placeholder de T-08).
 5. Manejar el caso del modal 401: si el error de la mutación es 401, mostrar `Dialog` con "Sesión expirada — inicia sesión nuevamente".
 
-**Criterio de hecho**: TC-13, TC-14, TC-15, TC-17, TC-18, TC-19 pasan manualmente. El toggle cambia de estado de forma instantánea (antes de recibir respuesta del servidor).
+**Criterio de hecho**: TC-13, TC-14, TC-15, TC-16, TC-17, TC-18, TC-19 pasan manualmente. El toggle cambia de estado de forma instantánea (antes de recibir respuesta del servidor).
 
 **ADR referenciados**: ADR-0003, ADR-0004  
 **Pruebas manuales**: TC-13, TC-14, TC-15, TC-16, TC-17, TC-18, TC-19
@@ -344,8 +356,8 @@ Después del SQL: en Supabase Studio → Database → Replication, habilitar Rea
 2. `useQuery` para cargar el hábito por ID con sus check-ins.
 3. Crear `hooks/useUpdateHabit.ts` con `useMutation` que hace PATCH en `habits` + `router.back()` al éxito.
 4. Crear `hooks/useDeleteHabit.ts` con `useMutation`:
-   - Si racha actual = 0 (sin check-ins): DELETE físico del hábito (CASCADE elimina `check_ins`).
-   - Si racha > 0: soft-delete (`deleted_at = now()`), preserva `check_ins`.
+   - Si el hábito no tiene ningún check-in registrado (`count = 0`): DELETE físico (CASCADE elimina `check_ins`).
+   - Si tiene al menos un check-in: soft-delete (`deleted_at = now()`), preserva el historial en `check_ins`.
    - `onSuccess`: `queryClient.invalidateQueries(['habits'])` + `router.push('/')`.
 5. Reutilizar `HabitForm` en modo edición: props `defaultValues` con los datos del hábito.
 6. Sección de historial: lista de los últimos 30 días de check-ins (fecha local + "✓" o vacío), formato compacto.
